@@ -279,7 +279,6 @@ class hdf5_lib:
         self.metadata = {}
         self.pilot_samples = []
         self.uplink_samples = []
-        self.downlink_samples = []
         self.noise_samples = []
         self.n_frm_st = n_fr_insp_st                                # index of last frame
         self.n_frm_end = self.n_frm_st + n_frames_to_inspect    # index of last frame in the range of n_frames_to_inspect
@@ -339,26 +338,22 @@ class hdf5_lib:
             else:
                 self.pilot_samples = self.data['Pilot_Samples'][self.n_frm_st:self.n_frm_end:self.sub_sample, ...]
 
-        if 'UplinkData' in self.data:
-            if self.n_frm_st == self.n_frm_end:
-                # Consider the entire dataset (for demos etc)
-                self.uplink_samples = self.data['UplinkData']
-            else:
-                self.uplink_samples = self.data['UplinkData'][self.n_frm_st:self.n_frm_end:self.sub_sample, ...]
+        if len(self.data.keys()) > 1:
+            print("looking into UplinkData")
+            if 'UplinkData' in self.data:
+                if self.n_frm_st == self.n_frm_end:
+                    # Consider the entire dataset (for demos etc)
+                    self.uplink_samples = self.data['UplinkData']
+                else:
+                    self.uplink_samples = self.data['UplinkData'][self.n_frm_st:self.n_frm_end:self.sub_sample, ...]
 
-        if 'Noise_Samples' in self.data:
-            if self.n_frm_st == self.n_frm_end:
-                # Consider the entire dataset (for demos etc)
-                self.noise_samples = self.data['Noise_Samples']
-            else:
-                self.noise_samples = self.data['Noise_Samples'][self.n_frm_st:self.n_frm_end:self.sub_sample, ...]
-
-        if 'DownlinkData' in self.data:
-            if self.n_frm_st == self.n_frm_end:
-                # Consider the entire dataset (for demos etc)
-                self.downlink_samples = self.data['DownlinkData']
-            else:
-                self.downlink_samples = self.data['DownlinkData'][self.n_frm_st:self.n_frm_end:self.sub_sample, ...]
+            print("looking into Noise Samples (if enabled in Sounder)")
+            if 'Noise_Samples' in self.data:
+                if self.n_frm_st == self.n_frm_end:
+                    # Consider the entire dataset (for demos etc)
+                    self.noise_samples = self.data['Noise_Samples']
+                else:
+                    self.noise_samples = self.data['Noise_Samples'][self.n_frm_st:self.n_frm_end:self.sub_sample, ...]
 
         return self.data
 
@@ -416,6 +411,36 @@ class hdf5_lib:
             pilot_sc_vals = self.metadata['OFDM_PILOT_SC_VALS']
             pilot_sc_vals_complex = pilot_sc_vals[0::2] + 1j * pilot_sc_vals[1::2]
             self.metadata['OFDM_PILOT_SC_VALS'] = pilot_sc_vals_complex
+
+            # Time-domain OFDM data
+            num_cl = np.squeeze(self.metadata['CL_NUM'])
+            for clIdx in range(num_cl):
+                this_str = 'OFDM_DATA_TIME_CL' + str(clIdx)
+                if not this_str in self.metadata.keys():
+                    continue
+                data_per_cl = np.squeeze(self.metadata[this_str])
+                # some_list[start:stop:step]
+                if np.any(data_per_cl):
+                    # If data present
+                    I = np.double(data_per_cl[0::2])
+                    Q = np.double(data_per_cl[1::2])
+                    IQ = I + Q * 1j
+                    self.metadata[this_str] = IQ
+
+            # Frequency-domain OFDM data
+            for clIdx in range(num_cl):
+                this_str = 'OFDM_DATA_CL' + str(clIdx)
+                if not this_str in self.metadata.keys():
+                    continue
+                data_per_cl = np.squeeze(self.metadata[this_str])
+                # some_list[start:stop:step]
+                if np.any(data_per_cl):
+                    # If data present
+                    I = np.double(data_per_cl[0::2])
+                    Q = np.double(data_per_cl[1::2])
+                    IQ = I + Q * 1j
+                    self.metadata[this_str] = IQ
+                # print('IQ.shape:', IQ.shape) # (640, )
 
         return self.metadata
 
@@ -511,7 +536,7 @@ class hdf5_lib:
         Returns:
             csi: Complex numpy array with [Frame, Cell, User, Pilot Rep, Antenna, Subcarrier]
             iq: Complex numpy array of raw IQ samples [Frame, Cell, User, Pilot Rep, Antenna, samples]
-     
+            same modulation?
         Example:
             h5log = h5py.File(filename,'r')
             csi,iq = samps2csi(h5log['Pilot_Samples'], h5log.attrs['num_mob_ant']+1, h5log.attrs['samples_per_user'])
@@ -586,6 +611,7 @@ class hdf5_lib:
             fftstart = time.time()
             csi = np.empty(iq.shape, dtype='complex64')
             zero_sc = np.where(pilot_f == 0)[0]
+            print('zero subcarrier:', zero_sc)
             nonzero_sc_size = len(pilot_f) - len(zero_sc)
 
             fft_length = int(np.power(2, np.ceil(np.log2(nonzero_sc_size))))
@@ -595,9 +621,23 @@ class hdf5_lib:
             #start_i = int((fft_length - nonzero_sc_size) // 2)
             #stop_i = int(start_i + nonzero_sc_size)
             nonzero_sc = np.setdiff1d(range(fft_size), zero_sc)
+            print('nonzero_sc:', nonzero_sc)
+            print('nonzero_sc.shape', nonzero_sc.shape)
             iq_fft = np.fft.fft(iq, fft_size, 5)
             seq_freq_inv = 1 / pilot_f[nonzero_sc]
             csi = iq_fft[:, : , :, :, :, nonzero_sc] * seq_freq_inv
+
+            # calculate the approximate SNR range to run the experiment
+            nonzero_sub = iq_fft[:, : , :, :, :, nonzero_sc]
+            zero_sub = iq_fft[:, :, :, :, :, zero_sc]
+
+            power_nonzero = np.sum(nonzero_sub*nonzero_sub.conjugate())/len(nonzero_sc)
+            power_zero = np.sum(zero_sub*zero_sub.conjugate())/len(zero_sc)
+
+            approximate_SNR = 10*np.log10(np.real(power_nonzero/power_zero))
+
+            print('the approximate SNR:', approximate_SNR)
+
             endtime = time.time()
             if debug:
                 print("csi.shape:{} lts_freq.shape: {}, pre_csi.shape = {}".format(
@@ -609,6 +649,16 @@ class hdf5_lib:
                 print("csi.shape:{}".format(csi.shape))
             print("samps2csi took %f seconds" % (time.time() - samps2csi_start))
 
+        # print("=======   start saving the csi & iq data   =======")
+        # print("Running dirctory {}".format(sys.argv[0]))
+        # path = '/home/keng/RENEWLab/PYTHON/IrisUtils/csi_data/'
+        # if not os.path.exists(path):
+        #     print("No such path!!! Now create one!!!")
+        #     os.makedirs(path)
+        #     print("Path create succeed!!!")
+        # np.save('{}csi_data.npy'.format(path), csi)
+        # np.save('{}iq_data.npy'.format(path), iq)
+        # print("=======   finish saving the csi & iq data   =======")
         return csi, iq
 
     @staticmethod
