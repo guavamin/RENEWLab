@@ -4,4 +4,4 @@ I mainly use the Python code `plot_hdf5.py` at line 341 and `hdf5_lib.py` at lin
 
 After getting the required data for the MMNet Model, I can start to fit the collected data into the Model.
 
-The code of MMNet is put in the directory `learning_based_usetfv1` and for more detail you can see the README.md document in that directory.
+The code of MMNet is put in the directory `learning_based_usetfv1` and for more detail you can see the `README.md` in that directory.
